@@ -1,0 +1,6 @@
+Address,Amount
+kaspatest:qq3zfy0dq06h3fn6vg9zfdh5zflz4wvh8v723kt4354qmcz8gfumqz7rg7ndt,200.83
+kaspatest:qq3zfy0dq06h3fn6vg9zfdh5zflz4wvh8v723kt4354qmcz8gfumqz7rg7ndt,0.08
+kaspatest:qq3zfy0dq06h3fn6vg9zfdh5zflz4wvh8v723kt4354qmcz8gfumqz7rg7ndt,0.43
+
+End of redistribution report
