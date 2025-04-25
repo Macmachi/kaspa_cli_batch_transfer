@@ -5,159 +5,193 @@ This documentation explains how the Kaspa batch transfer script works and provid
 ## Table of Contents
 
 1. [Script Overview](#script-overview)
-2. [How the Script Works](#how-the-script-works)
-3. [Installing Kaspa CLI Wallet on Linux](#installing-kaspa-cli-wallet-on-linux)
-4. [Using the Script](#using-the-script)
-5. [Redistribution File Format](#redistribution-file-format)
-6. [Troubleshooting](#troubleshooting)
+2. [What's New in v1.1.0](#whats-new-in-v110)
+3. [How the Script Works](#how-the-script-works)
+4. [Installing Kaspa CLI Wallet on Linux](#installing-kaspa-cli-wallet-on-linux)
+5. [Using the Script](#using-the-script)
+6. [Redistribution File Format](#redistribution-file-format)
+7. [Troubleshooting](#troubleshooting)
+
+---
 
 ## Script Overview
 
-The `kaspa_batch.py` script is a tool for automating batch transfers of Kaspa (KAS) cryptocurrency through the Kaspa CLI wallet. It allows you to process multiple transactions from a single wallet to multiple recipients in an automated fashion, handling all interaction with the Kaspa CLI.
+The `kaspa_batch.py` script is a tool for automating batch transfers of Kaspa (KAS) cryptocurrency through the Kaspa CLI wallet. It allows you to process multiple transactions from a single wallet to multiple recipients, supports both mainnet and testnet, and handles all CLI interactions automatically.
 
-### Key Features:
+### Key Features
 
-- Support for both mainnet and testnet networks
-- Detailed logging of all operations
-- Balance checking before transfers
-- Secure password handling
-- Error handling and reporting
-- Transaction verification
+- **Multi-wallet support:** Detects and lists all available wallets, allowing you to select which one to use.
+- Support for both mainnet and testnet networks.
+- Detailed logging of all operations (see the `logs` directory).
+- Balance checking before transfers.
+- Secure password handling.
+- Error handling and reporting.
+- Transaction verification.
+
+---
+
+## What's New in v1.1.0
+
+**Multi-wallet support!**
+- The script detects all available wallets in your Kaspa CLI and lets you choose which wallet to use for your batch transfer.
+- If there is only one wallet, it is selected automatically.
+- Password prompts only appear after you've selected your wallet.
+- Logs contain more granular detail for easier troubleshooting.
+
+---
 
 ## How the Script Works
 
-The script operates by:
+The script automates batch Kaspa transfers by the following steps:
 
-1. Reading a redistribution file containing addresses and amounts
-2. Validating addresses and amounts
-3. Calculating the total amount needed (including transaction fees)
-4. Checking if the wallet has sufficient balance
-5. Automating the Kaspa CLI to perform the transfers
-6. Providing detailed reporting of successful and failed transfers
+1. **Reading a redistribution file** containing addresses and amounts.
+2. **Validating addresses and amounts** for safety.
+3. **Calculating the total amount** (including an estimation for fees).
+4. **Detecting and listing all wallets** in your Kaspa CLI wallet directory.
+5. **Allowing you to choose the desired wallet** interactively.
+6. **Authenticating** with your wallet/password (supports different payment password if needed).
+7. **Checking the selected wallet's balance**.
+8. **Performing all transfers one by one** with error handling and feedback.
+9. **Logging all actions and results** to the `logs` directory.
 
-### Technical Implementation:
+**Technical Implementation:**
 
-The script uses `tmux` to create a detached terminal session in which it runs the Kaspa CLI. It then communicates with this session to:
+- Uses `tmux` to interact with the Kaspa CLI in a detached session.
+- Automates CLI prompts, handles password entry securely, and adapts to CLI output using pattern matching.
+- Gives detailed log feedback in both terminal and log files.
 
-- Initialize the CLI
-- Connect to the appropriate network (mainnet or testnet)
-- Open the wallet (you have to create one on testnet or mainnet before to start the script!)
-- Extract the current balance
-- Perform transfers
-- Handle errors
-
-The script uses pattern matching to respond to different CLI prompts and accurately track the state of each operation.
+---
 
 ## Installing Kaspa CLI Wallet on Linux
 
-The Kaspa CLI wallet is part of the rusty-kaspa project, which is built in Rust. Follow these steps to install it on your Linux system: https://github.com/kaspanet/rusty-kaspa 
+Follow these steps to install it on your Linux system:
 
-### Prerequisites:
-
-1. **Install required package:**
-
+1. **Install prerequisites:**
    ```bash
    sudo apt update
    sudo apt install tmux
+   sudo apt install cargo  # If Rust is not already installed
    ```
-2. **Build the CLI wallet:**
 
+2. **Build the CLI wallet:**
    ```bash
+   git clone https://github.com/kaspanet/rusty-kaspa.git
+   cd rusty-kaspa
    cargo build --release -p kaspa-cli
    ```
 
-   This will compile the CLI wallet into the `target/release` directory.
-
-3. **Run the CLI wallet (for testing the installation):**
-
-   ```bash
+3. **Run the CLI wallet:**
+   ```
    cd cli
    cargo run --release
    ```
 
-   You should see the Kaspa CLI prompt:
-
-   ```
-   Welcome to Kaspa CLI!
-   Type 'help' for list of commands
-   >>
-   ```
-
-4. **Create a new wallet (first time only):**
-
-   Within the CLI:
-
+4. **Create one or more wallets (first time only):**
    ```
    >> network mainnet
    >> connect wss://anna.kaspa.stream/kaspa/mainnet/wrpc/borsh
    >> create
    ```
 
-   Follow the prompts to create your wallet, set passwords, and save your seed phrase.
+   - Pick a **unique wallet name/label** every time you create a wallet in the CLI.
+   - You can create as many wallets as you want (for hot wallets, cold wallets, etc.).
+   - The script will detect them and allow you to choose during transfer.
+
+---
 
 ## Using the Script
 
-### Setting Up the Redistribution File:
-
-Create a file named `redistribution.txt` in the same directory as the script with the following format:
-
-```
-Address,Amount
-kaspa:address1,10.5
-kaspa:address2,5.25
-kaspa:address3,1.75
-End of redistribution report
-```
-
-### Running the Script:
-
-1. Make sure your redistribution file is properly formatted and in the same directory as the script.
-
-2. Run the script:
-
+1. **Prepare your redistribution file** (see below for format).
+2. **Make sure you have built and initialized at least one wallet in the Kaspa CLI.**
+3. **Run the script:**
    ```bash
    python3 kaspa_batch.py
    ```
 
-3. Follow the prompts to:
-   - Select network (mainnet or testnet)
-   - Enter your wallet and payment passwords
-   - Confirm transfers
+4. **Follow the interactive prompts:**
+   - Select network (`mainnet`/`testnet`)
+   - Choose one of your wallets from the detected list
+   - Enter the wallet and payment passwords (securely, after wallet selection)
+   - Confirm transfer if balance is sufficient
 
-### Reviewing Results:
+5. **Check logs**:
+   - Results and logs can be found in the `logs/` directory.
 
-The script creates a detailed log file in the `logs` directory that you can review to see the results of all operations.
+---
 
 ## Redistribution File Format
 
-The redistribution file must follow this specific format:
+Your `redistribution.txt` file should look like this:
 
-1. Start with a header line: `Address,Amount`
-2. Include one transfer per line with format: `address,amount`
-3. End with: `End of redistribution report`
+```
+Address,Amount
+kaspa:qxyz...abc1,10.5
+kaspa:qxyz...def2,5.25
+kaspa:qxyz...ghi3,1.75
+End of redistribution report
+```
 
-Notes:
-- Addresses can be with or without the `kaspa:` or `kaspatest:` prefix
-- Amounts must be positive numbers
-- The script validates all entries and reports any issues
+- You may omit the `kaspa:` or `kaspatest:` prefix; the script will add it as appropriate for the selected network.
+- **Amounts must be positive numbers**.
+- Addresses incompatible with the selected network are ignored (with a warning in the logs).
+- Any lines with invalid format or data are ignored (also logged).
+
+---
 
 ## Troubleshooting
 
-### Common Issues:
+**Common Issues:**
 
-1. **"tmux is not installed"**:
-   - Install tmux using: `sudo apt install tmux`
+- "**tmux is not installed**":  
+  Install it using `sudo apt install tmux`.
 
-2. **"Unable to retrieve wallet balance"**:
-   - Ensure you're connected to the correct network
-   - Check that your wallet is properly configured
+- "**Unable to retrieve wallet balance**":  
+  Make sure you're connected to the correct network and using the correct password for the chosen wallet.
 
-3. **"Insufficient balance"**:
-   - Add funds to your wallet before running the script
+- "**Insufficient balance**":  
+  Fund your wallet if you want all transfers to succeed, or allow partial transfers when prompted.
 
-4. **Transfer failures**:
-   - Check the logs for specific error messages
-   - Verify that addresses are correct and valid for the selected network
+- "**No wallets detected**":  
+  Ensure you have created at least one wallet in Kaspa CLI; otherwise, the script will use the default `"kaspa"` wallet.
+
+- "**Transfer failures**":  
+  See the log file (`logs/`) for detailed errors: invalid addresses, insufficient funds, password issues, or network timeouts.
+
+---
+
+## Example Workflow
+
+```text
+$ python3 kaspa_batch.py
+Choose network (mainnet/testnet): mainnet
+📋 Getting available wallets...
+📂 Available wallets:
+  1. kaspa
+  2. my_hot_wallet
+  3. cold1
+Choose wallet (1-3): 2
+
+🔑 Entering wallet credentials:
+Enter wallet password:
+Enter payment password (leave empty if same):
+
+💰 Current balance: 58.43008834 KAS
+Estimated total with fees: 15.75006108 KAS
+Do you want to proceed with transfers? (y/n): y
+[1/3] Sending 10.5 KAS to kaspa:qxyz...abc1
+✅ Transfer successful: 10.5 KAS → kaspa:qxyz...abc1 (TX ID: ...)
+[2/3] Sending 5.25 KAS to kaspa:qxyz...def2
+✅ Transfer successful: 5.25 KAS → kaspa:qxyz...def2 (TX ID: ...)
+[3/3] Sending 1.75 KAS to kaspa:qxyz...ghi3
+✅ Transfer successful: 1.75 KAS → kaspa:qxyz...ghi3 (TX ID: ...)
+
+📊 Transfer summary: 3 successful, 0 failed
+
+Closing Kaspa CLI...
+Closing tmux session...
+
+✅ Script finished. Operation log available in logs/kaspa_transfers_YYYYMMDD_HHMMSS.log
+```
 
 ### Log Files:
 
