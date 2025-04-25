@@ -11,7 +11,8 @@ This documentation explains how the Kaspa batch transfer script works and provid
 5. [Using the Script](#using-the-script)
 6. [Redistribution File Format](#redistribution-file-format)
 7. [Troubleshooting](#troubleshooting)
-
+8. [Example Workflow](#example-workflow)
+   
 ---
 
 ## Script Overview
