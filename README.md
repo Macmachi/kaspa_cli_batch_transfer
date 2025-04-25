@@ -157,6 +157,9 @@ End of redistribution report
 - "**Transfer failures**":  
   See the log file (`logs/`) for detailed errors: invalid addresses, insufficient funds, password issues, or network timeouts.
 
+### Log Files:
+The script creates log files in the `logs` directory with detailed information about each run. These logs can be valuable for troubleshooting issues.
+
 ---
 
 ## Example Workflow
@@ -167,8 +170,8 @@ Choose network (mainnet/testnet): mainnet
 📋 Getting available wallets...
 📂 Available wallets:
   1. kaspa
-  2. my_hot_wallet
-  3. cold1
+  2. wallet2
+  3. wallet3
 Choose wallet (1-3): 2
 
 🔑 Entering wallet credentials:
@@ -192,7 +195,3 @@ Closing tmux session...
 
 ✅ Script finished. Operation log available in logs/kaspa_transfers_YYYYMMDD_HHMMSS.log
 ```
-
-### Log Files:
-
-The script creates log files in the `logs` directory with detailed information about each run. These logs can be valuable for troubleshooting issues.
