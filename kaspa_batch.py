@@ -1,6 +1,20 @@
 '''
 * Author : Rymentz
-* Version : v1.0.0
+* Version : v1.1.0
+
+Multi-wallet support:
+- The script now detects and lists available wallets
+- You can choose which wallet to use for each batch of transfers
+- Default wallet "kaspa" is automatically selected if it's the only wallet
+
+Usage:
+1. Run the script: python3 kaspa_batch.py
+2. Select network (mainnet/testnet)
+3. Choose a wallet from the detected list
+4. Enter wallet password when prompted
+5. Confirm transfers if balance is sufficient
+
+Detailed logs are automatically saved to the logs directory.
 '''
 
 import subprocess
@@ -13,7 +27,6 @@ from datetime import datetime
 
 # Configuration
 REDISTRIBUTION_FILE = "redistribution.txt"
-DEBUG_MODE = False  # Debug mode
 
 # Log configuration
 LOG_DIRECTORY = "logs"
@@ -22,18 +35,22 @@ if not os.path.exists(LOG_DIRECTORY):
 
 LOG_FILENAME = os.path.join(LOG_DIRECTORY, f"kaspa_transfers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
-# Configure logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILENAME),
-        logging.StreamHandler()
-    ]
-)
+# Configure loggers - one for file (with all details) and one for console (with less details)
+# File logger - logs everything including DEBUG messages
+file_handler = logging.FileHandler(LOG_FILENAME)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Console handler - only logs INFO and above
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(message)s'))
+
+# Configure root logger
 logger = logging.getLogger()
-if DEBUG_MODE:
-    logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture all messages
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 # Network-specific configuration
 NETWORK_CONFIGS = {
@@ -154,7 +171,7 @@ def calculate_total_amount(transfers):
     total_with_fees = total + (len(transfers) * fees_estimate)
     return total, total_with_fees
 
-def tmux_send_command_with_pattern(session_name, command, expected_pattern=None, max_wait=30, password=False):
+def tmux_send_command_with_pattern(session_name, command, expected_pattern=None, max_wait=30, password=False, success_message=None):
     """Sends a command and waits for a specific pattern in the output"""
     # Define default patterns based on the command
     if expected_pattern is None:
@@ -176,9 +193,19 @@ def tmux_send_command_with_pattern(session_name, command, expected_pattern=None,
     logger.info(f"Executing command: {display_cmd}")
     
     # Send the command
-    escaped_command = command.replace('"', '\\"')
-    cmd = f'tmux send-keys -t {session_name} "{escaped_command}" Enter'
-    subprocess.run(cmd, shell=True, check=True)
+    # Handle passwords specially to avoid issues with special characters
+    if password:
+        # For passwords, we send each character individually to avoid shell interpretation issues
+        for char in command:
+            char_cmd = f'tmux send-keys -t {session_name} "{char}"'
+            subprocess.run(char_cmd, shell=True, check=True)
+        # Then send Enter key
+        subprocess.run(f'tmux send-keys -t {session_name} Enter', shell=True, check=True)
+    else:
+        # For regular commands, escape double quotes
+        escaped_command = command.replace('"', '\\"')
+        cmd = f'tmux send-keys -t {session_name} "{escaped_command}" Enter'
+        subprocess.run(cmd, shell=True, check=True)
     
     # Wait for the expected pattern
     start_time = time.time()
@@ -201,6 +228,11 @@ def tmux_send_command_with_pattern(session_name, command, expected_pattern=None,
                 found = True
             elif "Send - Amount:" in output:
                 found = True
+            
+            # Also check for error conditions
+            if "Unable to decrypt" in output:
+                logger.error("❌ Authentication error: Unable to decrypt")
+                found = True  # Consider it found to avoid timeout, we'll handle the error elsewhere
         
         if not found:
             time.sleep(0.5)
@@ -208,12 +240,28 @@ def tmux_send_command_with_pattern(session_name, command, expected_pattern=None,
     # If we didn't find the pattern within the timeout
     if not found:
         logger.warning(f"Pattern '{expected_pattern}' not found within {max_wait}s timeout")
+        if success_message:
+            # Generate appropriate failure message instead of just replacing symbols
+            if "password accepted" in success_message:
+                logger.error(f"❌ Authentication failed")
+            elif "connected" in success_message.lower():
+                logger.error(f"❌ Connection failed")
+            else:
+                # Generic failure for other cases
+                failure_message = success_message.replace('✅', '❌')
+                # Remove "successful" or "successfully" from the message if present
+                failure_message = failure_message.replace("successfully", "failed to")
+                failure_message = failure_message.replace("successful", "failed")
+                logger.error(f"{failure_message}")
+    else:
+        # Log success message if provided
+        if success_message:
+            logger.info(f"{success_message}")
     
-    # Capture final state for debugging
-    if DEBUG_MODE:
-        output_cmd = f'tmux capture-pane -p -t {session_name}'
-        output = subprocess.run(output_cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
-        logger.debug(f"State after command '{display_cmd}':\n{output}")
+    # Capture final state for debugging (always log to debug level)
+    output_cmd = f'tmux capture-pane -p -t {session_name}'
+    output = subprocess.run(output_cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
+    logger.debug(f"State after command '{display_cmd}':\n{output}")
     
     return output if found else None
 
@@ -264,6 +312,80 @@ def extract_transaction_id(output):
         logger.debug(f"Error extracting transaction ID: {e}")
     return None
 
+def get_available_wallets(session_name):
+    """Gets a list of available wallets using the wallet list command"""
+    logger.info("Retrieving available wallets...")
+    
+    # Clear any previous output to ensure clean state
+    tmux_send_command_with_pattern(
+        session_name, 
+        "clear", 
+        "$", 
+        5, 
+        success_message="✅ Terminal screen cleared"
+    )
+    
+    # Execute the wallet list command with increased wait time
+    print("⏳ Fetching wallet list...")
+    logger.info("Executing 'wallet list' command...")
+    tmux_send_command_with_pattern(
+        session_name, 
+        "wallet list", 
+        "$", 
+        15,
+        success_message="✅ Wallet list command executed"
+    )
+    
+    # Wait extra time for the output to fully populate
+    time.sleep(3)
+    
+    # Capture the full output
+    output_cmd = f'tmux capture-pane -p -t {session_name}'
+    output = subprocess.run(output_cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
+    
+    # Log the complete output for debugging (to log file only, not terminal)
+    logger.debug(f"Output from 'wallet list' command:\n{output}")
+    
+    # Parse output to find wallet names
+    wallets = []
+    
+    # First look for the specific pattern shown in the example ("Wallets:" section)
+    wallets_section_idx = output.find("Wallets:")
+    if wallets_section_idx != -1:
+        logger.debug("Found 'Wallets:' section")
+        
+        # Extract the section between "Wallets:" and the next prompt
+        wallets_section = output[wallets_section_idx:]
+        if "$" in wallets_section:
+            wallets_section = wallets_section.split("$")[0]  # Stop at the next prompt
+        
+        # Process each line
+        for line in wallets_section.split('\n')[1:]:  # Skip the "Wallets:" line
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Handle the format shown in the example: "  wallet_name: label" or just "  wallet_name"
+            if ":" in line:
+                wallet_name = line.split(":")[0].strip()
+                logger.debug(f"Found wallet with colon format: '{wallet_name}'")
+            else:
+                wallet_name = line.strip()
+                logger.debug(f"Found wallet: '{wallet_name}'")
+                
+            if wallet_name and wallet_name not in wallets:
+                wallets.append(wallet_name)
+    
+    # If no wallets found, add default kaspa wallet
+    if not wallets:
+        print("No wallets detected. Using default wallet 'kaspa'")
+        logger.warning("No wallets detected. Using default wallet 'kaspa'")
+        wallets = ["kaspa"]
+    
+    print(f"\nDetected wallets: {', '.join(wallets)}")
+    logger.info(f"Detected wallets: {', '.join(wallets)}")
+    return wallets
+
 def automate_kaspa_transfers():
     """Automates Kaspa transfers via CLI interface"""
     # Ask user to choose network
@@ -294,14 +416,6 @@ def automate_kaspa_transfers():
     logger.info(f"Found {len(transfers)} transfers to make for a total of {total_amount} {network_config['currency_symbol']}")
     logger.info(f"Estimated total with fees: {total_with_fees} {network_config['currency_symbol']}")
     
-    # Request passwords securely
-    wallet_password = getpass.getpass("Enter wallet password: ")
-    payment_password = getpass.getpass("Enter payment password (leave empty if same): ")
-    
-    # If payment password is empty, use wallet password
-    if not payment_password:
-        payment_password = wallet_password
-    
     try:
         # Check if tmux is installed
         try:
@@ -316,79 +430,257 @@ def automate_kaspa_transfers():
         # Create a new detached tmux session
         logger.info("Creating a tmux session for Kaspa CLI...")
         subprocess.run(f'tmux new-session -d -s {session_name}', shell=True, check=True)
+        logger.info("✅ Tmux session created successfully")
         
         # Initialize Kaspa CLI
-        tmux_send_command_with_pattern(session_name, f"cd ~/rusty-kaspa/cli && cargo run --release", "type 'help' for list of commands", 20)
-        tmux_send_command_with_pattern(session_name, network_config["network_cmd"], "Setting network id to:")
-        tmux_send_command_with_pattern(session_name, network_config["connect_cmd"], "Connected to Kaspa node")
-        tmux_send_command_with_pattern(session_name, "open", "Enter wallet password:")
-        wallet_output = tmux_send_command_with_pattern(session_name, wallet_password, "Your wallet hint is:", password=True)
-        
-        # Get wallet balance
-        balance = get_wallet_balance(session_name, network_config["currency_symbol"])
-        
-        if balance is None:
-            logger.error("Unable to retrieve wallet balance.")
+        logger.info("Starting Kaspa CLI...")
+        cli_result = tmux_send_command_with_pattern(
+            session_name, 
+            f"cd ~/rusty-kaspa/cli && cargo run --release", 
+            "type 'help' for list of commands", 
+            30,
+            success_message="✅ Kaspa CLI started successfully"
+        )
+        if cli_result is None:
+            logger.error("❌ Failed to start Kaspa CLI")
             logger.info("Closing tmux session...")
             subprocess.run(f'tmux kill-session -t {session_name}', shell=True, check=True)
             return
         
+        # Connect to network
+        logger.info(f"Setting network to {network_choice}...")
+        network_result = tmux_send_command_with_pattern(
+            session_name, 
+            network_config["network_cmd"], 
+            "Setting network id to:", 
+            max_wait=10,
+            success_message=f"✅ Network set to {network_choice}"
+        )
+        if network_result is None:
+            logger.error("❌ Failed to set network")
+            logger.info("Closing tmux session...")
+            subprocess.run(f'tmux kill-session -t {session_name}', shell=True, check=True)
+            return
+        
+        # Connect to Kaspa node with retry logic
+        logger.info("Connecting to Kaspa node...")
+        max_retries = 3
+        retry_count = 0
+        connection_successful = False
+        
+        while retry_count < max_retries and not connection_successful:
+            if retry_count > 0:
+                logger.warning(f"Retrying connection to Kaspa node (attempt {retry_count+1}/{max_retries})...")
+                
+            connect_result = tmux_send_command_with_pattern(
+                session_name, 
+                network_config["connect_cmd"], 
+                "Connected to Kaspa node", 
+                max_wait=10,
+                success_message="✅ Successfully connected to Kaspa node"
+            )
+            
+            if connect_result is not None:
+                connection_successful = True
+            else:
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(2)  # Wait before retry
+        
+        if not connection_successful:
+            logger.error("❌ Failed to connect to Kaspa node after 3 attempts")
+            logger.info("Closing tmux session...")
+            subprocess.run(f'tmux kill-session -t {session_name}', shell=True, check=True)
+            return
+        
+        # Get available wallets - this will now display raw output for debugging
+        print("\n✅ Connected to Kaspa node")
+        print("\n📋 Getting available wallets...")
+        
+        available_wallets = get_available_wallets(session_name)
+        
+        # Print available wallets to console
+        print("\n📂 Available wallets:")
+        for i, wallet in enumerate(available_wallets):
+            print(f"  {i+1}. {wallet}")
+        
+        # Select wallet
+        selected_wallet = None
+        if len(available_wallets) == 1:
+            selected_wallet = available_wallets[0]
+            print(f"\nOnly one wallet available. Automatically selecting: {selected_wallet}")
+            logger.info(f"Only one wallet available. Automatically selecting: {selected_wallet}")
+        else:
+            while True:
+                wallet_choice = input(f"\nChoose wallet (1-{len(available_wallets)}): ").strip()
+                try:
+                    wallet_index = int(wallet_choice) - 1
+                    if 0 <= wallet_index < len(available_wallets):
+                        selected_wallet = available_wallets[wallet_index]
+                        break
+                    else:
+                        print(f"Please enter a number between 1 and {len(available_wallets)}.")
+                except ValueError:
+                    print("Please enter a valid number.")
+        
+        print(f"\n✅ Selected wallet: {selected_wallet}")
+        logger.info(f"Selected wallet: {selected_wallet}")
+        
+        # Request passwords securely AFTER wallet selection
+        print("\n🔑 Entering wallet credentials:")
+        wallet_password = getpass.getpass("Enter wallet password: ")
+        payment_password = getpass.getpass("Enter payment password (leave empty if same): ")
+        
+        # If payment password is empty, use wallet password
+        if not payment_password:
+            payment_password = wallet_password
+        
+        # Open the selected wallet with the correct 'wallet open' command format
+        if selected_wallet == "kaspa" or selected_wallet == "default":
+            # Use wallet open command with default wallet
+            wallet_open_cmd = "wallet open"
+        else:
+            # Specify the wallet name
+            wallet_open_cmd = f"wallet open {selected_wallet}"
+        
+        print(f"\n🔐 Opening wallet using command: {wallet_open_cmd}")
+        logger.info("Opening wallet...")
+        wallet_open_result = tmux_send_command_with_pattern(
+            session_name, 
+            wallet_open_cmd, 
+            "Enter wallet password:", 
+            15,
+            success_message="✅ Wallet opening initiated"
+        )
+        if wallet_open_result is None:
+            logger.error("❌ Failed to open wallet")
+            logger.info("Closing tmux session...")
+            subprocess.run(f'tmux kill-session -t {session_name}', shell=True, check=True)
+            return
+            
+        logger.info("Entering wallet password...")
+        wallet_output = tmux_send_command_with_pattern(
+            session_name, 
+            wallet_password, 
+            "Your wallet hint is:", 
+            password=True,
+            success_message="✅ Wallet password accepted"
+        )
+        if wallet_output is None:
+            logger.error("❌ Failed to enter wallet password")
+            logger.info("Closing tmux session...")
+            subprocess.run(f'tmux kill-session -t {session_name}', shell=True, check=True)
+            return
+        
+        # Get wallet balance
+        logger.info("Retrieving wallet balance...")
+        balance = get_wallet_balance(session_name, network_config["currency_symbol"])
+        
+        if balance is None:
+            logger.error("❌ Unable to retrieve wallet balance")
+            logger.info("Closing tmux session...")
+            subprocess.run(f'tmux kill-session -t {session_name}', shell=True, check=True)
+            logger.info("✅ Tmux session closed successfully")
+            return
+        
         # Compare balance and total amount
+        print(f"\n💰 Current balance: {balance} {network_config['currency_symbol']}")
         logger.info(f"Current balance: {balance} {network_config['currency_symbol']}")
+        logger.info(f"✅ Wallet balance retrieved successfully")
         
         if balance < total_with_fees:
             shortfall = total_with_fees - balance
+            print(f"\n⚠️ INSUFFICIENT BALANCE! Missing {shortfall:.8f} {network_config['currency_symbol']} to make all transfers.")
             logger.warning(f"⚠️ INSUFFICIENT BALANCE! Missing {shortfall:.8f} {network_config['currency_symbol']} to make all transfers.")
             
             confirm = input("Balance is insufficient. Do you want to continue with possible transfers anyway? (y/n): ").strip().lower()
             if confirm != 'y':
                 logger.info("Operation cancelled by user.")
                 logger.info("Closing Kaspa CLI...")
-                tmux_send_command_with_pattern(session_name, "exit", "bye!", 5)
+                tmux_send_command_with_pattern(
+                    session_name, 
+                    "exit", 
+                    "bye!", 
+                    5,
+                    success_message="✅ Kaspa CLI closed successfully"
+                )
                 logger.info("Closing tmux session...")
                 subprocess.run(f'tmux kill-session -t {session_name}', shell=True, check=True)
+                logger.info("✅ Tmux session closed successfully")
                 return
         else:
             excess = balance - total_with_fees
-            logger.info(f"✅ SUFFICIENT BALANCE! About {excess:.8f} {network_config['currency_symbol']} will remain after transfers.")
+            # Use only one output method to avoid duplication
+            print(f"\n✅ SUFFICIENT BALANCE! About {excess:.8f} {network_config['currency_symbol']} will remain after transfers.")
             
             confirm = input("Do you want to proceed with transfers? (y/n): ").strip().lower()
             if confirm != 'y':
                 logger.info("Operation cancelled by user.")
                 logger.info("Closing Kaspa CLI...")
-                tmux_send_command_with_pattern(session_name, "exit", "bye!", 5)
+                tmux_send_command_with_pattern(
+                    session_name, 
+                    "exit", 
+                    "bye!", 
+                    5,
+                    success_message="✅ Kaspa CLI closed successfully"
+                )
                 logger.info("Closing tmux session...")
                 subprocess.run(f'tmux kill-session -t {session_name}', shell=True, check=True)
+                logger.info("✅ Tmux session closed successfully")
                 return
         
         # Perform transfers
+        print("\n📤 Starting transfers...")
         successful_transfers = 0
         failed_transfers = 0
         error_details = []  # List to store error details
         
         for i, (address, amount) in enumerate(transfers):
-            logger.info(f"[{i+1}/{len(transfers)}] Sending {amount} {network_config['currency_symbol']} to {address}")
+            # Use only one output method for transfer start message
+            print(f"[{i+1}/{len(transfers)}] Sending {amount} {network_config['currency_symbol']} to {address}")
             
             # Send transfer command
-            send_output = tmux_send_command_with_pattern(session_name, f"send {address} {amount}", "Enter wallet password:")
+            logger.info(f"Initiating transfer {i+1}/{len(transfers)}...")
+            send_output = tmux_send_command_with_pattern(
+                session_name, 
+                f"send {address} {amount}", 
+                "Enter wallet password:",
+                success_message=f"✅ Transfer command accepted for {address}"
+            )
             if send_output is None:
                 error_msg = "Error sending transfer command"
+                print(f"❌ {error_msg}")
                 logger.error(f"❌ {error_msg}")
                 error_details.append(f"Transfer #{i+1}: {error_msg}")
                 failed_transfers += 1
                 continue
             
             # Enter wallet password
-            wallet_password_output = tmux_send_command_with_pattern(session_name, wallet_password, "Enter payment password:", password=True)
+            logger.info("Entering wallet password...")
+            wallet_password_output = tmux_send_command_with_pattern(
+                session_name, 
+                wallet_password, 
+                "Enter payment password:", 
+                password=True,
+                success_message="✅ Wallet password accepted"
+            )
             if wallet_password_output is None:
                 error_msg = "Error entering wallet password"
+                print(f"❌ {error_msg}")
                 logger.error(f"❌ {error_msg}")
                 error_details.append(f"Transfer #{i+1}: {error_msg}")
                 failed_transfers += 1
                 continue
             
             # Enter payment password
-            payment_output = tmux_send_command_with_pattern(session_name, payment_password, "Send - Amount:", password=True)
+            logger.info("Entering payment password...")
+            payment_output = tmux_send_command_with_pattern(
+                session_name, 
+                payment_password, 
+                "Send - Amount:", 
+                password=True,
+                success_message="✅ Payment password accepted"
+            )
             
             # Check if transfer was successful
             output_cmd = f'tmux capture-pane -p -t {session_name}'
@@ -398,16 +690,18 @@ def automate_kaspa_transfers():
                 # Try to extract transaction ID
                 tx_id = extract_transaction_id(output)
                 
+                # Use only one output method for success message
                 if tx_id:
-                    logger.info(f"✅ Transfer successful: {amount} {network_config['currency_symbol']} → {address} (TX ID: {tx_id})")
+                    print(f"✅ Transfer successful: {amount} {network_config['currency_symbol']} → {address} (TX ID: {tx_id})")
                 else:
-                    logger.info(f"✅ Transfer successful: {amount} {network_config['currency_symbol']} → {address}")
+                    print(f"✅ Transfer successful: {amount} {network_config['currency_symbol']} → {address}")
                 successful_transfers += 1
             else:
                 # Detailed error analysis
                 error_msg = "Unknown error"
                 if "not enough funds" in output:
                     error_msg = "Insufficient funds"
+                    print(f"❌ Transfer failed: {error_msg} - stopping transfers")
                     logger.error(f"❌ Transfer failed: {error_msg} - stopping transfers")
                     error_details.append(f"Transfer #{i+1}: {error_msg}")
                     failed_transfers += 1
@@ -425,6 +719,7 @@ def automate_kaspa_transfers():
                     except:
                         pass
                 
+                print(f"❌ Transfer failed: {amount} {network_config['currency_symbol']} → {address} - {error_msg}")
                 logger.error(f"❌ Transfer failed: {amount} {network_config['currency_symbol']} → {address} - {error_msg}")
                 logger.debug(f"Error details:\n{output}")
                 error_details.append(f"Transfer #{i+1}: {error_msg}")
@@ -434,29 +729,39 @@ def automate_kaspa_transfers():
             time.sleep(3)
         
         # Display transfer summary
+        print(f"\n📊 Transfer summary: {successful_transfers} successful, {failed_transfers} failed")
         logger.info(f"Transfer summary: {successful_transfers} successful, {failed_transfers} failed")
         
         # Display error details if any
         if error_details:
+            print("\nDetails of encountered errors:")
             logger.info("Details of encountered errors:")
             for error in error_details:
+                print(f"  - {error}")
                 logger.info(f"  - {error}")
         
-        # Get new balance
-        new_balance = get_wallet_balance(session_name, network_config["currency_symbol"])
-        if new_balance is not None:
-            spent = balance - new_balance
-            logger.info(f"Final balance: {new_balance} {network_config['currency_symbol']} (amount spent: {spent} {network_config['currency_symbol']})")
+        # Final balance section removed - balances don't update immediately in the wallet
         
         # Close CLI and tmux session
+        print("\nClosing Kaspa CLI...")
         logger.info("Closing Kaspa CLI...")
-        tmux_send_command_with_pattern(session_name, "exit", "bye!", 5)
+        tmux_send_command_with_pattern(
+            session_name, 
+            "exit", 
+            "bye!", 
+            5, 
+            success_message="✅ Kaspa CLI closed successfully"
+        )
+        print("Closing tmux session...")
         logger.info("Closing tmux session...")
         subprocess.run(f'tmux kill-session -t {session_name}', shell=True, check=True)
+        logger.info("✅ Tmux session closed successfully")
         
+        print(f"\n✅ Script finished. Operation log available in {LOG_FILENAME}")
         logger.info(f"Script finished. Operation log available in {LOG_FILENAME}")
         
     except Exception as e:
+        print(f"\n❌ Error: {e}")
         logger.error(f"Error: {e}")
         logger.exception("Error details:")
         
