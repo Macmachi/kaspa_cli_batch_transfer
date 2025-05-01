@@ -1,6 +1,7 @@
 # Kaspa Batch Transfer Tool Documentation
 
 This documentation explains how the Kaspa batch transfer script works and provides instructions for installing the Kaspa CLI wallet on Linux.
+⚠️ IMPORTANT: Passwords should not contain special characters to avoid technical issues.
 
 ## Table of Contents
 
