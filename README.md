@@ -5,7 +5,7 @@ This documentation explains how the Kaspa batch transfer script works and provid
 ## Table of Contents
 
 1. [Script Overview](#script-overview)
-2. [What's New in v1.1.0](#whats-new-in-v110)
+2. [What's New in v1.3.0](#whats-new-in-v130)
 3. [How the Script Works](#how-the-script-works)
 4. [Installing Kaspa CLI Wallet on Linux](#installing-kaspa-cli-wallet-on-linux)
 5. [Using the Script](#using-the-script)
@@ -23,21 +23,24 @@ The `kaspa_batch.py` script is a tool for automating batch transfers of Kaspa (K
 
 - **Multi-wallet support:** Detects and lists all available wallets, allowing you to select which one to use.
 - Support for both mainnet and testnet networks.
+- **Transaction verification:** Verifies transfers through the Kaspa REST API.
+- **Retry mechanism:** Automatically retries transfers that initially fail with "Insufficient funds" errors.
 - Detailed logging of all operations (see the `logs` directory).
 - Balance checking before transfers.
 - Secure password handling.
 - Error handling and reporting.
-- Transaction verification.
 
 ---
 
-## What's New in v1.1.0
+## What's New in v1.3.0
 
-**Multi-wallet support!**
-- The script detects all available wallets in your Kaspa CLI and lets you choose which wallet to use for your batch transfer.
-- If there is only one wallet, it is selected automatically.
-- Password prompts only appear after you've selected your wallet.
-- Logs contain more granular detail for easier troubleshooting.
+**Improved Transaction Reliability and Verification!**
+- Added API integration with `https://api.kaspa.org` to verify transaction receipt.
+- Implemented retry mechanism for "Insufficient funds" errors.
+- Increased transaction verification timeout for more reliable confirmations.
+- More robust transaction detection to minimize false negatives.
+- Automatic creation of "pending transactions" file for any unconfirmed transfers.
+- Default wallet "kaspa" is automatically selected if it's the only wallet.
 
 ---
 
@@ -53,12 +56,15 @@ The script automates batch Kaspa transfers by the following steps:
 6. **Authenticating** with your wallet/password (supports different payment password if needed).
 7. **Checking the selected wallet's balance**.
 8. **Performing all transfers one by one** with error handling and feedback.
-9. **Logging all actions and results** to the `logs` directory.
+9. **Verifying each transaction** through the Kaspa API to confirm receipt.
+10. **Logging all actions and results** to the `logs` directory.
 
 **Technical Implementation:**
 
 - Uses `tmux` to interact with the Kaspa CLI in a detached session.
+- Connects to the Kaspa REST API to verify transactions reached their destination.
 - Automates CLI prompts, handles password entry securely, and adapts to CLI output using pattern matching.
+- Implements exponential backoff for transaction verification attempts.
 - Gives detailed log feedback in both terminal and log files.
 
 ---
@@ -119,6 +125,7 @@ Follow these steps to install it on your Linux system:
 
 5. **Check logs**:
    - Results and logs can be found in the `logs/` directory.
+   - If any transfers are pending verification, a `pending_transactions_TIMESTAMP.txt` file will be created.
 
 ---
 
@@ -163,6 +170,9 @@ End of redistribution report
 - "**Transfer failures**":  
   See the log file (`logs/`) for detailed errors: invalid addresses, insufficient funds, password issues, or network timeouts.
 
+- "**API connectivity issues**":
+  If the script cannot connect to the Kaspa API for transaction verification, check your internet connection and try again.
+
 ### Log Files:
 The script creates log files in the `logs` directory with detailed information about each run. These logs can be valuable for troubleshooting issues.
 
@@ -187,14 +197,19 @@ Enter payment password (leave empty if same):
 💰 Current balance: 58.43008834 KAS
 Estimated total with fees: 15.75006108 KAS
 Do you want to proceed with transfers? (y/n): y
-[1/3] Sending 10.5 KAS to kaspa:qxyz...abc1
-✅ Transfer successful: 10.5 KAS → kaspa:qxyz...abc1 (TX ID: ...)
-[2/3] Sending 5.25 KAS to kaspa:qxyz...def2
-✅ Transfer successful: 5.25 KAS → kaspa:qxyz...def2 (TX ID: ...)
-[3/3] Sending 1.75 KAS to kaspa:qxyz...ghi3
-✅ Transfer successful: 1.75 KAS → kaspa:qxyz...ghi3 (TX ID: ...)
 
-📊 Transfer summary: 3 successful, 0 failed
+📤 Starting transfers...
+[1/3] Sending 10.5 KAS to kaspa:qxyz...abc1
+⏳ Vérifiant la réception de 10.5 KAS par kaspa:qxyz...abc1...
+✅ Transaction vérifiée: 10.5 KAS → kaspa:qxyz...abc1 (TX ID: ...)
+[2/3] Sending 5.25 KAS to kaspa:qxyz...def2
+⏳ Vérifiant la réception de 5.25 KAS par kaspa:qxyz...def2...
+✅ Transaction vérifiée: 5.25 KAS → kaspa:qxyz...def2 (TX ID: ...)
+[3/3] Sending 1.75 KAS to kaspa:qxyz...ghi3
+⏳ Vérifiant la réception de 1.75 KAS par kaspa:qxyz...ghi3...
+✅ Transaction vérifiée: 1.75 KAS → kaspa:qxyz...ghi3 (TX ID: ...)
+
+📊 Transfer summary: 3 successful, 0 pending, 0 failed
 
 Closing Kaspa CLI...
 Closing tmux session...
