@@ -1,11 +1,16 @@
 '''
 * Author : Rymentz
-* Version : v1.1.0
+* Version : v1.3.0
 
 Multi-wallet support:
 - The script now detects and lists available wallets
 - You can choose which wallet to use for each batch of transfers
 - Default wallet "kaspa" is automatically selected if it's the only wallet
+
+Improvements:
+- Added retry mechanism for "Insufficient funds" errors
+- Increased transaction verification timeout
+- More robust transaction detection
 
 Usage:
 1. Run the script: python3 kaspa_batch.py
@@ -23,10 +28,20 @@ import logging
 import getpass
 import os
 import re
+import requests
 from datetime import datetime
+
+# Ajout de la configuration pour l'API Kaspa
+API_BASE_URL = "https://api.kaspa.org"
 
 # Configuration
 REDISTRIBUTION_FILE = "redistribution.txt"
+# Paramètres pour la vérification des transactions
+TRANSACTION_CHECK_INTERVAL = 10  # Vérifier toutes les 10 secondes
+TRANSACTION_CHECK_TIMEOUT = 60   # Vérifier pendant 60 secondes maximum
+# Paramètres pour les retries de transfert
+TRANSFER_RETRY_ATTEMPTS = 3      # Nombre maximum de tentatives
+TRANSFER_RETRY_DELAY = 5         # Délai en secondes entre les tentatives
 
 # Log configuration
 LOG_DIRECTORY = "logs"
@@ -67,6 +82,106 @@ NETWORK_CONFIGS = {
         "currency_symbol": "TKAS"
     }
 }
+
+# Fonctions pour vérifier les transactions
+def get_transactions(address, limit=50, max_retries=3):
+    """Récupère les transactions pour une adresse avec mécanisme de retry."""
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            url = f"{API_BASE_URL}/addresses/{address}/full-transactions"
+            params = {
+                "limit": limit,
+                "resolve_previous_outpoints": "light"
+            }
+            
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            retry_count += 1
+            logger.warning(f"Erreur API (tentative {retry_count}/{max_retries}): {e}")
+            if retry_count < max_retries:
+                # Backoff exponentiel
+                sleep_time = 2 ** retry_count
+                time.sleep(sleep_time)
+            else:
+                logger.error(f"Échec API après {max_retries} tentatives")
+                return []
+    
+    return []
+
+def has_received_exact_amount(address, expected_amount, transactions):
+    """
+    Vérifie si l'adresse a reçu le montant attendu dans l'une de ses transactions récentes.
+    Utilise un arrondi à une décimale et une tolérance pour accommoder les frais.
+    """
+    try:
+        # Convertir le montant attendu
+        expected_amount_float = float(expected_amount)
+        expected_amount_rounded = round(expected_amount_float, 1)
+        
+        # Tolérance augmentée pour les frais (0.2 KAS au lieu de 0.1)
+        min_acceptable = expected_amount_rounded - 0.2
+        
+        logger.debug(f"Recherche de paiement pour {address}: attendu {expected_amount_rounded} KAS (min {min_acceptable} KAS)")
+        
+        for tx in transactions:
+            # Ignorer les transactions non acceptées
+            if not tx.get("is_accepted", False):
+                continue
+            
+            # Vérifier les sorties de la transaction pour voir si le montant correspond
+            for output in tx.get("outputs", []):
+                if output.get("script_public_key_address") == address:
+                    # Convertir sompi en KAS (1 KAS = 10^8 sompi)
+                    received_amount = output.get("amount", 0) / 1e8
+                    received_amount_rounded = round(received_amount, 1)
+                    
+                    logger.debug(f"Montant trouvé: {received_amount_rounded} KAS")
+                    
+                    # Vérification avec tolérance accrue pour les frais
+                    if received_amount_rounded >= min_acceptable and received_amount_rounded <= (expected_amount_rounded + 0.2):
+                        logger.debug(f"✅ Montant valide trouvé: {received_amount_rounded} KAS (attendu: {expected_amount_rounded} KAS)")
+                        return True
+        
+        logger.debug(f"❌ Aucun montant valide trouvé pour {address}")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de la vérification du montant: {e}")
+        return False
+
+def verify_transaction_received(address, amount, max_wait_time=TRANSACTION_CHECK_TIMEOUT, check_interval=TRANSACTION_CHECK_INTERVAL):
+    """
+    Vérifie périodiquement si la transaction a été reçue par l'adresse cible avec backoff exponentiel.
+    Retourne True si la transaction est détectée, False sinon.
+    """
+    logger.info(f"🔍 Vérifiant la réception de {amount} KAS par {address}...")
+    
+    # Utiliser un backoff exponentiel pour les vérifications
+    current_interval = check_interval
+    max_interval = 20  # Intervalle maximum entre les vérifications
+    
+    end_time = time.time() + max_wait_time
+    while time.time() < end_time:
+        # Récupérer les transactions récentes de l'adresse
+        transactions = get_transactions(address)
+        
+        # Vérifier si le montant attendu est présent
+        if has_received_exact_amount(address, amount, transactions):
+            logger.info(f"✅ Transaction vérifiée: {amount} KAS reçus par {address}")
+            return True
+            
+        # Calculer le temps d'attente avec backoff
+        sleep_time = min(current_interval, max_interval)
+        logger.debug(f"Transaction non détectée, nouvelle vérification dans {sleep_time} secondes...")
+        time.sleep(sleep_time)
+        current_interval *= 1.5  # Augmentation progressive
+    
+    logger.warning(f"⚠️ Transaction non détectée après {max_wait_time} secondes pour {address}")
+    return False
 
 def read_redistribution_file(file_path, address_prefix):
     """Reads the redistribution file with enhanced validation"""
@@ -267,34 +382,74 @@ def tmux_send_command_with_pattern(session_name, command, expected_pattern=None,
 
 def get_wallet_balance(session_name, currency_symbol):
     """Retrieves the current wallet balance with a robust method"""
+    # Exécuter la commande 'balance' pour afficher explicitement le solde
+    logger.info("Requesting wallet balance information...")
+    tmux_send_command_with_pattern(
+        session_name,
+        "balance",
+        "$",
+        10
+    )
+    
+    # Attendre que le solde s'affiche
+    time.sleep(2)
+    
+    # Capturer la sortie
     output_cmd = f'tmux capture-pane -p -t {session_name}'
     output = subprocess.run(output_cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
     
-    # Use regex to extract the balance
-    balance_pattern = r'•\s*([\d,]+\.\d+)\s*' + re.escape(currency_symbol)
-    match = re.search(balance_pattern, output)
+    # Log complet pour débogage
+    logger.debug(f"Output for balance extraction:\n{output}")
     
-    if match:
-        try:
-            # Extract and convert the balance
-            balance_str = match.group(1).replace(',', '')
-            return float(balance_str)
-        except Exception as e:
-            logger.debug(f"Regex match found but conversion error: {e}")
+    # Plusieurs patterns pour attraper différents formats d'affichage du solde
+    patterns = [
+        # Format standard: "• 123.456 KAS"
+        r'•\s*([\d,]+\.\d+)\s*' + re.escape(currency_symbol),
+        # Format balance: "Balance: 123.456 KAS"
+        r'[Bb]alance[:]?\s*([\d,]+\.\d+)\s*' + re.escape(currency_symbol),
+        # Format avec parenthèses: "(123.456 KAS)"
+        r'\(\s*([\d,]+\.\d+)\s*' + re.escape(currency_symbol) + r'\)',
+        # Format générique: tout nombre suivi du symbole de devise
+        r'([\d,]+\.\d+)\s*' + re.escape(currency_symbol)
+    ]
     
-    # Fallback method if regex fails
-    for line in output.split('\n'):
-        if currency_symbol in line and "•" in line:
+    # Essayer chaque pattern
+    for pattern in patterns:
+        match = re.search(pattern, output)
+        if match:
             try:
-                # Extract the part after "•" and before the currency symbol
-                parts = line.split("•")
-                if len(parts) >= 2:
-                    balance_text = parts[1].split(currency_symbol)[0].strip()
-                    # Remove anything that's not a digit, comma, or period
-                    clean_balance = re.sub(r'[^\d,.]', '', balance_text)
-                    return float(clean_balance.replace(',', ''))
+                balance_str = match.group(1).replace(',', '')
+                logger.debug(f"Match found using pattern: {pattern}")
+                logger.debug(f"Extracted balance string: {balance_str}")
+                return float(balance_str)
             except Exception as e:
-                logger.debug(f"Fallback attempt failed on line '{line}': {e}")
+                logger.debug(f"Regex match found but conversion error: {e}")
+    
+    # Si aucun pattern ne fonctionne, essayer avec la commande 'info'
+    logger.info("Balance not found, trying 'info' command...")
+    tmux_send_command_with_pattern(
+        session_name,
+        "info",
+        "$",
+        10
+    )
+    
+    # Attendre que les infos s'affichent
+    time.sleep(2)
+    
+    # Recapturer la sortie
+    output = subprocess.run(output_cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
+    logger.debug(f"Output from 'info' command:\n{output}")
+    
+    # Réessayer tous les patterns
+    for pattern in patterns:
+        match = re.search(pattern, output)
+        if match:
+            try:
+                balance_str = match.group(1).replace(',', '')
+                return float(balance_str)
+            except Exception as e:
+                logger.debug(f"Regex match found but conversion error: {e}")
     
     logger.warning("Unable to extract wallet balance")
     return None
@@ -385,6 +540,86 @@ def get_available_wallets(session_name):
     print(f"\nDetected wallets: {', '.join(wallets)}")
     logger.info(f"Detected wallets: {', '.join(wallets)}")
     return wallets
+
+def attempt_transfer(session_name, address, amount, wallet_password, payment_password, currency_symbol, max_attempts=TRANSFER_RETRY_ATTEMPTS):
+    """Tente d'effectuer un transfert avec plusieurs essais en cas d'erreur 'Insufficient funds'"""
+    
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            print(f"🔄 Tentative #{attempt} pour transférer {amount} {currency_symbol} vers {address}...")
+            logger.info(f"Tentative #{attempt} pour transférer {amount} {currency_symbol} vers {address}")
+            
+        # Envoi de la commande
+        send_output = tmux_send_command_with_pattern(
+            session_name, 
+            f"send {address} {amount}", 
+            "Enter wallet password:",
+            success_message=f"✅ Commande de transfert acceptée pour {address}" if attempt == 1 else None
+        )
+        
+        if send_output is None:
+            return None, "Erreur d'envoi de commande"
+        
+        # Mot de passe du portefeuille
+        wallet_password_output = tmux_send_command_with_pattern(
+            session_name, 
+            wallet_password, 
+            "Enter payment password:", 
+            password=True,
+            success_message="✅ Mot de passe portefeuille accepté" if attempt == 1 else None
+        )
+        
+        if wallet_password_output is None:
+            return None, "Erreur de mot de passe portefeuille"
+        
+        # Mot de passe de paiement
+        payment_output = tmux_send_command_with_pattern(
+            session_name, 
+            payment_password, 
+            "Send - Amount:", 
+            password=True,
+            success_message="✅ Mot de passe de paiement accepté" if attempt == 1 else None
+        )
+        
+        # Vérifier le résultat
+        output_cmd = f'tmux capture-pane -p -t {session_name}'
+        output = subprocess.run(output_cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
+        
+        # Si transfert réussi
+        if "Sending" in output and "tx ids:" in output:
+            tx_id = extract_transaction_id(output)
+            return output, None  # Succès
+        
+        # Si insufficient funds, on réessaie
+        elif "Insufficient funds" in output and attempt < max_attempts:
+            logger.warning(f"⚠️ Fonds insuffisants pour cette transaction spécifique (tentative {attempt}/{max_attempts})")
+            print(f"⚠️ Message 'Insufficient funds' - attente de {TRANSFER_RETRY_DELAY}s avant nouvelle tentative...")
+            time.sleep(TRANSFER_RETRY_DELAY)
+            continue  # Passer à la prochaine tentative
+        
+        # Autres erreurs ou dernier essai échoué
+        else:
+            if "Insufficient funds" in output:
+                error_msg = "Fonds insuffisants après plusieurs tentatives"
+            elif "invalid address" in output:
+                error_msg = "Adresse invalide"
+            elif "network error" in output:
+                error_msg = "Erreur réseau"
+            elif "error" in output.lower():
+                try:
+                    error_lines = [line for line in output.split('\n') if "error" in line.lower()]
+                    if error_lines:
+                        error_msg = error_lines[0].strip()
+                    else:
+                        error_msg = "Erreur inconnue"
+                except:
+                    error_msg = "Erreur inconnue"
+            else:
+                error_msg = "Erreur inconnue"
+            
+            return None, error_msg
+    
+    return None, "Échec après plusieurs tentatives"
 
 def automate_kaspa_transfers():
     """Automates Kaspa transfers via CLI interface"""
@@ -633,104 +868,92 @@ def automate_kaspa_transfers():
         print("\n📤 Starting transfers...")
         successful_transfers = 0
         failed_transfers = 0
+        pending_transfers = 0  # Transactions qui ont été envoyées mais non confirmées
         error_details = []  # List to store error details
         
         for i, (address, amount) in enumerate(transfers):
             # Use only one output method for transfer start message
             print(f"[{i+1}/{len(transfers)}] Sending {amount} {network_config['currency_symbol']} to {address}")
             
-            # Send transfer command
-            logger.info(f"Initiating transfer {i+1}/{len(transfers)}...")
-            send_output = tmux_send_command_with_pattern(
+            # Utiliser le mécanisme de retry pour les transferts
+            output, error = attempt_transfer(
                 session_name, 
-                f"send {address} {amount}", 
-                "Enter wallet password:",
-                success_message=f"✅ Transfer command accepted for {address}"
-            )
-            if send_output is None:
-                error_msg = "Error sending transfer command"
-                print(f"❌ {error_msg}")
-                logger.error(f"❌ {error_msg}")
-                error_details.append(f"Transfer #{i+1}: {error_msg}")
-                failed_transfers += 1
-                continue
-            
-            # Enter wallet password
-            logger.info("Entering wallet password...")
-            wallet_password_output = tmux_send_command_with_pattern(
-                session_name, 
+                address, 
+                amount, 
                 wallet_password, 
-                "Enter payment password:", 
-                password=True,
-                success_message="✅ Wallet password accepted"
-            )
-            if wallet_password_output is None:
-                error_msg = "Error entering wallet password"
-                print(f"❌ {error_msg}")
-                logger.error(f"❌ {error_msg}")
-                error_details.append(f"Transfer #{i+1}: {error_msg}")
-                failed_transfers += 1
-                continue
-            
-            # Enter payment password
-            logger.info("Entering payment password...")
-            payment_output = tmux_send_command_with_pattern(
-                session_name, 
-                payment_password, 
-                "Send - Amount:", 
-                password=True,
-                success_message="✅ Payment password accepted"
+                payment_password,
+                network_config['currency_symbol']
             )
             
-            # Check if transfer was successful
-            output_cmd = f'tmux capture-pane -p -t {session_name}'
-            output = subprocess.run(output_cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
-            
-            if "Sending" in output and "tx ids:" in output:
+            if output is not None:  # Transfert réussi
                 # Try to extract transaction ID
                 tx_id = extract_transaction_id(output)
+                tx_info = f"(TX ID: {tx_id})" if tx_id else ""
                 
-                # Use only one output method for success message
-                if tx_id:
-                    print(f"✅ Transfer successful: {amount} {network_config['currency_symbol']} → {address} (TX ID: {tx_id})")
+                # Attendre que la transaction soit confirmée
+                print(f"⏳ Vérifiant la réception de {amount} {network_config['currency_symbol']} par {address}...")
+                
+                # Ajout d'un délai avant de vérifier la transaction
+                time.sleep(5)
+                
+                # Vérifier si la transaction a été reçue
+                transaction_confirmed = verify_transaction_received(address, amount)
+                
+                if transaction_confirmed:
+                    print(f"✅ Transaction vérifiée: {amount} {network_config['currency_symbol']} → {address} {tx_info}")
+                    logger.info(f"✅ Transaction vérifiée: {amount} {network_config['currency_symbol']} → {address} {tx_info}")
+                    successful_transfers += 1
                 else:
-                    print(f"✅ Transfer successful: {amount} {network_config['currency_symbol']} → {address}")
-                successful_transfers += 1
-            else:
-                # Detailed error analysis
-                error_msg = "Unknown error"
-                if "not enough funds" in output:
-                    error_msg = "Insufficient funds"
-                    print(f"❌ Transfer failed: {error_msg} - stopping transfers")
-                    logger.error(f"❌ Transfer failed: {error_msg} - stopping transfers")
-                    error_details.append(f"Transfer #{i+1}: {error_msg}")
-                    failed_transfers += 1
-                    break
-                elif "invalid address" in output:
-                    error_msg = "Invalid address"
-                elif "network error" in output:
-                    error_msg = "Network error"
-                elif "error" in output.lower():
-                    # Try to extract error message
-                    try:
-                        error_lines = [line for line in output.split('\n') if "error" in line.lower()]
-                        if error_lines:
-                            error_msg = error_lines[0].strip()
-                    except:
-                        pass
-                
-                print(f"❌ Transfer failed: {amount} {network_config['currency_symbol']} → {address} - {error_msg}")
-                logger.error(f"❌ Transfer failed: {amount} {network_config['currency_symbol']} → {address} - {error_msg}")
-                logger.debug(f"Error details:\n{output}")
-                error_details.append(f"Transfer #{i+1}: {error_msg}")
+                    print(f"⚠️ Transaction potentiellement échouée: {amount} {network_config['currency_symbol']} → {address} {tx_info}")
+                    logger.warning(f"⚠️ Transaction potentiellement échouée: {amount} {network_config['currency_symbol']} → {address} {tx_info}")
+                    error_details.append(f"Transfer #{i+1}: Transaction potentiellement échouée vers {address}")
+                    pending_transfers += 1
+            else:  # Transfert échoué
+                print(f"❌ Échec du transfert: {amount} {network_config['currency_symbol']} → {address} - {error}")
+                logger.error(f"❌ Échec du transfert: {amount} {network_config['currency_symbol']} → {address} - {error}")
+                error_details.append(f"Transfer #{i+1}: {error}")
                 failed_transfers += 1
+                
+                # Si l'erreur indique un manque de fonds global et non local à la transaction
+                if "not enough funds" in error.lower() and "Insufficient funds" not in error:
+                    print(f"❌ Arrêt des transferts - fonds globalement insuffisants")
+                    logger.error(f"❌ Arrêt des transferts - fonds globalement insuffisants")
+                    break
             
             # Short pause between transfers
             time.sleep(3)
         
+        # Créer un fichier de récupération pour les transactions potentiellement échouées
+        if pending_transfers > 0:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            pending_file = f"pending_transactions_{timestamp}.txt"
+            
+            with open(pending_file, 'w') as f:
+                f.write("================================================================================\n")
+                f.write("TRANSACTIONS POTENTIELLEMENT ÉCHOUÉES - À VÉRIFIER MANUELLEMENT\n")
+                f.write("================================================================================\n")
+                f.write("Address,Amount\n")
+                
+                # Trouver les transactions en attente en utilisant les détails d'erreur
+                for error in error_details:
+                    if "potentiellement échouée vers" in error:
+                        # Extraire l'adresse
+                        address_match = re.search(r'échouée vers (kaspa:[a-z0-9]+)', error)
+                        if address_match:
+                            address = address_match.group(1)
+                            # Trouver le montant correspondant
+                            for addr, amt in transfers:
+                                if addr == address:
+                                    f.write(f"{address},{amt}\n")
+                
+                f.write("\nEnd of redistribution report\n")
+            
+            print(f"\n⚠️ Un fichier '{pending_file}' a été créé pour les transactions potentiellement échouées.")
+            logger.info(f"Fichier '{pending_file}' créé pour les transactions potentiellement échouées.")
+        
         # Display transfer summary
-        print(f"\n📊 Transfer summary: {successful_transfers} successful, {failed_transfers} failed")
-        logger.info(f"Transfer summary: {successful_transfers} successful, {failed_transfers} failed")
+        print(f"\n📊 Transfer summary: {successful_transfers} successful, {pending_transfers} pending, {failed_transfers} failed")
+        logger.info(f"Transfer summary: {successful_transfers} successful, {pending_transfers} pending, {failed_transfers} failed")
         
         # Display error details if any
         if error_details:
@@ -739,8 +962,6 @@ def automate_kaspa_transfers():
             for error in error_details:
                 print(f"  - {error}")
                 logger.info(f"  - {error}")
-        
-        # Final balance section removed - balances don't update immediately in the wallet
         
         # Close CLI and tmux session
         print("\nClosing Kaspa CLI...")
