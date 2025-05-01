@@ -1,7 +1,6 @@
 # Kaspa Batch Transfer Tool Documentation
 
 This documentation explains how the Kaspa batch transfer script works and provides instructions for installing the Kaspa CLI wallet on Linux.
-⚠️ IMPORTANT: Wallet passwords should not contain special characters to avoid technical issues with the script.
 
 ## Table of Contents
 
@@ -89,6 +88,8 @@ Follow these steps to install it on your Linux system:
    ```
 
 4. **Create one or more wallets (first time only):**
+   ⚠️ IMPORTANT: Wallet passwords should not contain special characters to avoid technical issues with the script.
+   
    ```
    >> network mainnet
    >> connect wss://anna.kaspa.stream/kaspa/mainnet/wrpc/borsh
@@ -155,6 +156,9 @@ End of redistribution report
 
 - "**No wallets detected**":  
   Ensure you have created at least one wallet in Kaspa CLI; otherwise, the script will use the default `"kaspa"` wallet.
+
+- "**Passwords with special characters**":
+  Avoid using special characters in your passwords as they can cause issues with the script's interaction with the CLI and may not be properly deciphered.
 
 - "**Transfer failures**":  
   See the log file (`logs/`) for detailed errors: invalid addresses, insufficient funds, password issues, or network timeouts.
