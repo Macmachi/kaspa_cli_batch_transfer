@@ -1,6 +1,6 @@
 '''
 * Author : Rymentz
-* Version : v1.3.0
+* Version : v1.3.1
 
 Multi-wallet support:
 - The script now detects and lists available wallets
@@ -381,12 +381,12 @@ def tmux_send_command_with_pattern(session_name, command, expected_pattern=None,
     return output if found else None
 
 def get_wallet_balance(session_name, currency_symbol):
-    """Retrieves the current wallet balance with a robust method"""
-    # Exécuter la commande 'balance' pour afficher explicitement le solde
+    """Retrieves the current wallet balance using the 'list' command"""
+    # Exécuter la commande 'list' pour afficher les comptes et leurs soldes
     logger.info("Requesting wallet balance information...")
     tmux_send_command_with_pattern(
         session_name,
-        "balance",
+        "list",
         "$",
         10
     )
@@ -402,15 +402,18 @@ def get_wallet_balance(session_name, currency_symbol):
     logger.debug(f"Output for balance extraction:\n{output}")
     
     # Plusieurs patterns pour attraper différents formats d'affichage du solde
+    # Note: [\d,]+ capture les chiffres avec ou sans virgules comme séparateurs de milliers
     patterns = [
-        # Format standard: "• 123.456 KAS"
-        r'•\s*([\d,]+\.\d+)\s*' + re.escape(currency_symbol),
+        # Format de la commande list: "w0111 [30d92145]: 6,007 KAS"
+        r':\s*([\d,]+(?:\.\d+)?)\s*' + re.escape(currency_symbol),
+        # Format standard: "• 123.456 KAS" ou "• 6,007 KAS"
+        r'•\s*([\d,]+(?:\.\d+)?)\s*' + re.escape(currency_symbol),
         # Format balance: "Balance: 123.456 KAS"
-        r'[Bb]alance[:]?\s*([\d,]+\.\d+)\s*' + re.escape(currency_symbol),
-        # Format avec parenthèses: "(123.456 KAS)"
-        r'\(\s*([\d,]+\.\d+)\s*' + re.escape(currency_symbol) + r'\)',
+        r'[Bb]alance[:]?\s*([\d,]+(?:\.\d+)?)\s*' + re.escape(currency_symbol),
+        # Format avec parenthèses: "(123.456 KAS)" ou "(6,007 KAS)"
+        r'\(\s*([\d,]+(?:\.\d+)?)\s*' + re.escape(currency_symbol) + r'\)',
         # Format générique: tout nombre suivi du symbole de devise
-        r'([\d,]+\.\d+)\s*' + re.escape(currency_symbol)
+        r'([\d,]+(?:\.\d+)?)\s*' + re.escape(currency_symbol)
     ]
     
     # Essayer chaque pattern
@@ -425,11 +428,11 @@ def get_wallet_balance(session_name, currency_symbol):
             except Exception as e:
                 logger.debug(f"Regex match found but conversion error: {e}")
     
-    # Si aucun pattern ne fonctionne, essayer avec la commande 'info'
-    logger.info("Balance not found, trying 'info' command...")
+    # Si aucun pattern ne fonctionne, essayer avec la commande 'details'
+    logger.info("Balance not found with 'list', trying 'details' command...")
     tmux_send_command_with_pattern(
         session_name,
-        "info",
+        "details",
         "$",
         10
     )
@@ -439,7 +442,7 @@ def get_wallet_balance(session_name, currency_symbol):
     
     # Recapturer la sortie
     output = subprocess.run(output_cmd, shell=True, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
-    logger.debug(f"Output from 'info' command:\n{output}")
+    logger.debug(f"Output from 'details' command:\n{output}")
     
     # Réessayer tous les patterns
     for pattern in patterns:
@@ -915,7 +918,7 @@ def automate_kaspa_transfers():
                 failed_transfers += 1
                 
                 # Si l'erreur indique un manque de fonds global et non local à la transaction
-                if "not enough funds" in error.lower() and "Insufficient funds" not in error:
+                if error and "not enough funds" in error.lower() and "Insufficient funds" not in error:
                     print(f"❌ Arrêt des transferts - fonds globalement insuffisants")
                     logger.error(f"❌ Arrêt des transferts - fonds globalement insuffisants")
                     break
